@@ -11,6 +11,12 @@ import logger from "./utils/logger.js";
 import { fetchOMDbData } from "./api/omdb.js";
 import { findBestBackdrop } from "./api/tmdb.js";
 import { isDiscordLinkableUrl, isValidUrl } from "./utils/url.js";
+import {
+  applySeriesProviderIds,
+  getBackdropItemId,
+  getNotificationTmdbId,
+  isSeriesChild,
+} from "./jellyfin/notificationMetadata.js";
 import { buildJellyfinUrl } from "./utils/jellyfinUrl.js";
 import {
   getLibraryChannels,
@@ -72,6 +78,7 @@ const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const CLEANUP_THRESHOLD_MS = 14 * 24 * 60 * 60 * 1000; // 14 days — periodic cleanup of stale debouncers
 const DEFAULT_DEBOUNCE_MS = 60000; // 60 seconds
 const NEW_SERIES_DEBOUNCE_MS = 120000; // 2 minutes - longer debounce for episodes/seasons of new series
+const SERIES_BURST_WINDOW_MS = 60 * 60 * 1000; // 1 hour - lower-level items in this window fold into the series notification
 const SEASON_NOTIFICATION_DELAY_MS = 3 * 60 * 1000; // 3 minutes - allow season notifications after this delay
 
 // Periodic cleanup for old debouncer entries and API cache (prevent memory leaks on long-running servers)
@@ -104,6 +111,15 @@ setInterval(() => {
     );
   }
 }, CLEANUP_INTERVAL_MS);
+
+// Before 1.6.3 each Series/Season/Episode was stored under series:tmdb:<its own TMDB ID>.
+// Only the level tells which kind of item wrote the entry, so require an exact match.
+function findLegacyItemKey(data) {
+  if (!data.Provider_tmdb) return null;
+  const legacyKey = `series:tmdb:${data.Provider_tmdb}`;
+  const entry = sentNotifications.get(legacyKey);
+  return entry?.level === getItemLevel(data.ItemType) ? legacyKey : null;
+}
 
 function getItemLevel(itemType) {
   switch (itemType) {
@@ -148,6 +164,9 @@ async function processAndSendNotification(
   onPendingRequestsChanged = null,
   isAnimeLibrary = false
 ) {
+  // Poller and WebSocket call this directly, so resolve here as well as in the webhook handler.
+  await applySeriesProviderIds(data);
+
   const {
     ItemType,
     ItemId,
@@ -173,8 +192,9 @@ async function processAndSendNotification(
     Audio_0_Language,
   } = data;
 
-  // We need to fetch details from TMDB to get the backdrop
-  const tmdbId = data.Provider_tmdb;
+  // A season's Provider_tmdb is a TMDB season ID, not a TV-series ID.
+  // Child notifications use the separately resolved parent series ID.
+  const tmdbId = getNotificationTmdbId(data);
 
   const testPrefix = isTestNotif ? "[TEST NOTIFICATION] " : "";
 
@@ -236,7 +256,7 @@ async function processAndSendNotification(
   let details = null;
   if (tmdbId) {
     // Check cache first
-    const cacheKey = `tmdb-${ItemType}-${tmdbId}`;
+    const cacheKey = `tmdb-${ItemType === "Movie" ? "movie" : "tv"}-${tmdbId}`;
     const cached = apiCache.get(cacheKey);
     const now = Date.now();
 
@@ -270,7 +290,10 @@ async function processAndSendNotification(
 
 
   // Prioritize IMDb ID from TMDB, fallback to webhook
-  const imdbId = details?.external_ids?.imdb_id || imdbIdFromWebhook;
+  const fallbackImdbId = isSeriesChild(ItemType)
+    ? data.SeriesProvider_imdb
+    : imdbIdFromWebhook;
+  const imdbId = details?.external_ids?.imdb_id || fallbackImdbId;
 
   const omdb = imdbId ? await fetchOMDbData(imdbId) : null;
 
@@ -517,14 +540,13 @@ async function processAndSendNotification(
   }
 
   const backdropPath = details ? findBestBackdrop(details) : null;
-  // Episodes don't have their own backdrop in Jellyfin — fall back to the series.
-  if (ItemType === "Episode" && !SeriesId) {
+  // Seasons and episodes generally do not have their own backdrop in Jellyfin.
+  if (isSeriesChild(ItemType) && !SeriesId) {
     logger.warn(
-      `Episode webhook missing SeriesId; backdrop fallback will use ItemId and likely 404. ItemId=${ItemId}, Name=${Name}`
+      `${ItemType} webhook missing SeriesId; backdrop fallback will use ItemId and may 404. ItemId=${ItemId}, Name=${Name}`
     );
   }
-  const fallbackBackdropItemId =
-    ItemType === "Episode" && SeriesId ? SeriesId : ItemId;
+  const fallbackBackdropItemId = getBackdropItemId(data);
   const backdrop = backdropPath
     ? `https://image.tmdb.org/t/p/w1280${backdropPath}`
     : buildJellyfinUrl(`Items/${fallbackBackdropItemId}/Images/Backdrop`);
@@ -944,6 +966,10 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
       }
     }
 
+    // Webhook Provider_tmdb is item-level. Resolve parent provider IDs before
+    // artwork, request matching, and series-level deduplication are handled.
+    await applySeriesProviderIds(data);
+
     if (data.ItemType === "Movie") {
       const { ItemId } = data;
       const isTestMovie = ItemId && ItemId.startsWith("test-");
@@ -993,12 +1019,19 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
       // Episodes/Seasons fold into a series-level entry by reusing the Series identity.
       const seriesIdentityInput = {
         ItemType: "Series",
-        Provider_tmdb: data.Provider_tmdb,
+        Provider_tmdb:
+          data.ItemType === "Series"
+            ? data.Provider_tmdb
+            : data.SeriesProvider_tmdb,
         SeriesId: SeriesId,
         Name: data.SeriesName || (data.ItemType === "Series" ? data.Name : null),
         ItemId: SeriesId,
       };
       const seriesKey = buildIdentityKey(seriesIdentityInput) || `id:${SeriesId}`;
+      // burstKey: short-lived, groups one import burst for the series.
+      // itemKey: permanent, stops file upgrades from re-announcing an item.
+      const burstKey = `burst:${seriesKey}`;
+      const itemKey = `item:${buildIdentityKey(data) || `id:${data.ItemId}`}`;
       logger.debug(`[DEDUP] Series identity key for "${data.Name}": ${seriesKey} (raw SeriesId: ${SeriesId})`);
       
       // Initialize variables outside the if block so they're accessible later
@@ -1012,7 +1045,24 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
       const skipDuplicateCheck = data.ItemId && data.ItemId.startsWith("test-");
       
       if (!skipDuplicateCheck) {
-        sentNotificationData = sentNotifications.get(seriesKey);
+        const matchedKey = isTestNotification
+          ? null
+          : sentNotifications.has(itemKey)
+          ? itemKey
+          : findLegacyItemKey(data);
+        if (matchedKey) {
+          logger.info(
+            `[DEDUP] Duplicate ${data.ItemType} notification suppressed for "${data.Name}" (key: ${matchedKey})`
+          );
+          if (res) {
+            return res
+              .status(200)
+              .send(`OK: Duplicate notification skipped for ${data.Name}.`);
+          }
+          return;
+        }
+
+        sentNotificationData = sentNotifications.get(burstKey);
         sentLevel = sentNotificationData ? sentNotificationData.level : 0;
         sentTimestamp = sentNotificationData
           ? sentNotificationData.timestamp
@@ -1041,7 +1091,7 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         }
       }
       // If a notification was already sent (sentLevel > 0), apply blocking rules
-      else if (sentLevel > 0 && currentLevel <= sentLevel) {
+      else if (sentLevel > 0 && currentLevel < sentLevel) {
         // For season notifications after a series notification, allow if enough time has passed
         if (currentLevel === 2 && sentLevel === 3) {
           // Season after Series
@@ -1074,6 +1124,15 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         logger.info(
           `[BLOCKED] Skipping ${data.ItemType} notification for ${data.Name}: already sent level ${sentLevel} (current level: ${currentLevel})`
         );
+        // Only mark items the sent post actually covered: a series post covers everything,
+        // a season post only its own seasons' episodes. -1 means nothing was sent yet.
+        const coveredBySentPost =
+          sentLevel === 3 ||
+          (sentLevel === 2 &&
+            sentNotificationData.seasons?.includes(data.SeasonNumber));
+        if (coveredBySentPost && !isTestNotification) {
+          sentNotifications.set(itemKey, { level: currentLevel });
+        }
         if (res) {
           return res
             .status(200)
@@ -1099,10 +1158,9 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
           onPendingRequestsChanged,
           isAnimeLibrary
         );
-        if (res)
-          return res
-            .status(200)
-            .send("OK: TV notification sent (no SeriesId).");
+        if (!isTestNotification) sentNotifications.set(itemKey, { level: currentLevel });
+        if (res) res.status(200).send("OK: TV notification sent (no SeriesId).");
+        return;
       }
 
       // Skip debouncing and caching logic for individual test notifications (not batch tests)
@@ -1137,21 +1195,6 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         !debouncedSenders.has(seriesKey) &&
         !creatingDebouncers.has(seriesKey)
       ) {
-        // Check if we already sent a notification for this series
-        if (sentLevel > 0) {
-          logger.debug(
-            `Already sent notification for SeriesId ${SeriesId} (level: ${sentLevel}). Skipping new debouncer creation.`
-          );
-          if (res) {
-            return res
-              .status(200)
-              .send(
-                `OK: Notification for ${data.Name} skipped, notification already sent.`
-              );
-          }
-          return;
-        }
-
         // Mark this SeriesId as currently creating a debouncer
         creatingDebouncers.add(seriesKey);
 
@@ -1174,6 +1217,20 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
           `[DEBOUNCER] Creating debouncer for ${data.ItemType} "${data.Name}" with ${debounceMs}ms timeout (new series: ${isNewSeries}, lower level: ${isLowerLevel}${isBatchTest ? ', batch test' : ''})`
         );
 
+        // The closure holds its own batch: a late trailing call must not touch a newer batch.
+        const batch = {
+          sender: null,
+          latestData: data,
+          episodeCount: 0,
+          episodes: [], // Track individual episodes - will be added below
+          firstEpisode: null,
+          lastEpisode: null,
+          seasonCount: 0,
+          seasons: [], // Track individual seasons - will be added below
+          timestamp: Date.now(), // Track creation time for periodic cleanup
+          itemKeys: new Map(), // itemKey -> level, persisted after a successful send
+        };
+
         const newDebouncedSender = debounce(
           async (
             latestData,
@@ -1182,6 +1239,12 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
             seasonCount = 0,
             seasonDetails = null
           ) => {
+            // Items arriving while this send is in flight belong to the next trailing call.
+            const itemKeysInSend = batch.itemKeys;
+            batch.itemKeys = new Map();
+            const seasonsInSend = [...batch.seasons, latestData]
+              .map((item) => item.SeasonNumber ?? (item.ItemType === "Season" ? item.IndexNumber : null))
+              .filter((n) => n != null);
             try {
               logger.info(`[DEBOUNCER] Firing debouncer for SeriesId: ${SeriesId} after ${debounceMs}ms wait. Episodes: ${episodeCount}, Seasons: ${seasonCount}`);
               const isBatchTestNotif = latestData.ItemId && latestData.ItemId.startsWith("batch-");
@@ -1202,46 +1265,42 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
               const levelSent = getItemLevel(latestData.ItemType);
 
               // Overwrites any temporary level=-1 marker.
-              sentNotifications.set(seriesKey, {
-                level: levelSent,
-                timestamp: Date.now(),
-              });
+              sentNotifications.set(
+                burstKey,
+                { level: levelSent, timestamp: Date.now(), seasons: seasonsInSend },
+                SERIES_BURST_WINDOW_MS
+              );
               logger.info(
                 `[SENT NOTIFICATION] Set sentLevel=${levelSent} for SeriesId ${SeriesId} (${latestData.Name})`
               );
+              for (const [key, level] of itemKeysInSend) {
+                sentNotifications.set(key, { level });
+              }
 
               // The debounced function has fired, we can remove it.
-              debouncedSenders.delete(seriesKey);
+              if (debouncedSenders.get(seriesKey) === batch) debouncedSenders.delete(seriesKey);
               creatingDebouncers.delete(seriesKey); // Also cleanup from creatingDebouncers
             } catch (error) {
+              const droppedItems = itemKeysInSend.size;
               logger.error(
-                `Error in debounced notification for series ${SeriesId}:`,
+                `Error in debounced notification for series ${SeriesId} (${droppedItems} item(s) not marked as sent, they can be announced again):`,
                 error
               );
               // Cleanup all maps on error so future webhooks for this series are not blocked
-              debouncedSenders.delete(seriesKey);
+              if (debouncedSenders.get(seriesKey) === batch) debouncedSenders.delete(seriesKey);
               creatingDebouncers.delete(seriesKey);
               // Clear temp marker (-1) so the series is not blocked after a failed notification
-              if (sentNotifications.has(seriesKey)) {
-                const existing = sentNotifications.get(seriesKey);
-                if (existing.level === -1) sentNotifications.delete(seriesKey);
+              if (sentNotifications.has(burstKey)) {
+                const existing = sentNotifications.get(burstKey);
+                if (existing.level === -1) sentNotifications.delete(burstKey);
               }
             }
           },
           debounceMs
         );
 
-        debouncedSenders.set(seriesKey, {
-          sender: newDebouncedSender,
-          latestData: data,
-          episodeCount: 0,
-          episodes: [], // Track individual episodes - will be added below
-          firstEpisode: null,
-          lastEpisode: null,
-          seasonCount: 0,
-          seasons: [], // Track individual seasons - will be added below
-          timestamp: Date.now(), // Track creation time for periodic cleanup
-        });
+        batch.sender = newDebouncedSender;
+        debouncedSenders.set(seriesKey, batch);
 
         // Remove from creatingDebouncers now that it's been added to debouncedSenders
         creatingDebouncers.delete(seriesKey);
@@ -1251,7 +1310,7 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         // the entry gets overwritten with the real level; if it never fires (stuck or
         // crashed), the marker expires on its own so the series isn't blocked indefinitely.
         sentNotifications.set(
-          seriesKey,
+          burstKey,
           {
             level: -1, // Temporary marker indicating processing is in progress
             timestamp: Date.now(),
@@ -1269,6 +1328,7 @@ export async function handleJellyfinWebhook(req, res, client, pendingRequests, o
         if (res) return res.status(500).send("Internal error: debouncer not found");
         return;
       }
+      if (!isTestNotification) debouncer.itemKeys.set(itemKey, currentLevel);
       
       const existingLevel = getItemLevel(debouncer.latestData.ItemType);
 

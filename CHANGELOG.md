@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 🐛 Fixed
 
 - **"Send PM when request is available" and channel announcements couldn't be toggled independently** ([#134](https://github.com/openVESSL/Anchorr/issues/134)): Both were computed in one function, and disabling a channel announcement (e.g. for episodes/seasons) used an early return that also silently skipped the DM. Movies and series had no channel-level toggle in the real-time webhook path at all. The DM now always runs independent of the channel-announcement outcome, and new "Announce new movies/series in channel" checkboxes let you turn channel posts off without affecting DMs.
+- **Season and episode notifications showed artwork from an unrelated show** ([#126](https://github.com/openVESSL/Anchorr/issues/126)): Jellyfin gives each season and episode its own TMDB ID, and Anchorr looked that ID up as if it were a TV series, so "The Walking Dead - Season 4" could show the poster of whatever series happens to share that number. Seasons and episodes now resolve their parent series first, on the webhook, polling and WebSocket paths alike. This also fixes "Send PM when request is available" for seasons and episodes, which matched requests against the wrong ID. Thanks to @Lurk390 for the fix.
+- **Duplicate protection for series is now tracked per episode/season**: Already announced episodes, seasons and series are remembered individually, so a quality upgrade never re-announces them, while a new episode of a show you've been notified about before still gets announced. Existing duplicate history carries over on upgrade for items that had their own TMDB ID; others may be announced once more if their file is replaced.
 
 ### 🔒 Security
 
