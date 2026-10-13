@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import logger from "./logger.js";
 import { configSchema } from "./validation.js";
+import { configTemplate } from "../lib/config.js";
 
 // Fields that contain sensitive credentials and should be base64-encoded at rest
 const SENSITIVE_FIELDS = new Set([
@@ -15,6 +16,97 @@ const SENSITIVE_FIELDS = new Set([
 ]);
 
 const B64_PREFIX = "b64:";
+
+// ForFlower deployment values are supplied by the root-protected Compose
+// env_file. They override dashboard configuration and are not persisted as
+// plaintext or base64 data in config.json.
+const ENV_AUTHORITATIVE_FIELDS = new Set([
+  "DISCORD_TOKEN",
+  "BOT_ID",
+  "GUILD_ID",
+  "SEERR_URL",
+  "SEERR_API_KEY",
+  "JELLYFIN_BASE_URL",
+  "JELLYFIN_URL",
+  "JELLYFIN_API_KEY",
+  "JWT_SECRET",
+  "WEBHOOK_SECRET",
+  "WIZARR_API_KEY",
+  "WIZARR_API_URL",
+  "WIZARR_PUBLIC_URL",
+]);
+
+const ENV_SECRET_FIELDS = new Set([
+  "DISCORD_TOKEN",
+  "DISCORD_BOT_TOKEN",
+  "SEERR_API_KEY",
+  "JELLYFIN_API_KEY",
+  "JWT_SECRET",
+  "WEBHOOK_SECRET",
+  "WIZARR_API_KEY",
+  "TMDB_API_KEY",
+  "OMDB_API_KEY",
+]);
+
+function applyEnvironmentAliases() {
+  if (
+    !process.env.DISCORD_TOKEN &&
+    process.env.DISCORD_BOT_TOKEN
+  ) {
+    process.env.DISCORD_TOKEN =
+      process.env.DISCORD_BOT_TOKEN;
+  }
+
+  if (
+    !process.env.BOT_ID &&
+    process.env.DISCORD_APPLICATION_ID
+  ) {
+    process.env.BOT_ID =
+      process.env.DISCORD_APPLICATION_ID;
+  }
+
+  if (
+    !process.env.GUILD_ID &&
+    process.env.DISCORD_GUILD_ID
+  ) {
+    process.env.GUILD_ID =
+      process.env.DISCORD_GUILD_ID;
+  }
+}
+
+function applyAuthoritativeEnvironment(config) {
+  applyEnvironmentAliases();
+
+  const merged = { ...config };
+
+  for (const field of ENV_AUTHORITATIVE_FIELDS) {
+    const value = process.env[field];
+
+    if (
+      typeof value === "string" &&
+      value.trim() !== ""
+    ) {
+      merged[field] = value;
+    }
+  }
+
+  return merged;
+}
+
+function removeEnvironmentSecrets(config) {
+  const sanitized = { ...config };
+
+  for (const field of ENV_SECRET_FIELDS) {
+    if (
+      typeof process.env[field] === "string" &&
+      process.env[field].trim() !== ""
+    ) {
+      delete sanitized[field];
+    }
+  }
+
+  return sanitized;
+}
 
 function encodeConfig(config) {
   const out = { ...config };
@@ -182,10 +274,20 @@ export function writeConfig(config) {
     // Atomic write: write to a temp file then rename so a mid-write kill never
     // leaves a corrupted config.json behind.
     const tmpPath = CONFIG_PATH + ".tmp";
-    fs.writeFileSync(tmpPath, JSON.stringify(encodeConfig(config), null, 2), {
-      mode: 0o600,
-      encoding: "utf-8",
-    });
+    const persistentConfig = removeEnvironmentSecrets(config);
+
+    fs.writeFileSync(
+      tmpPath,
+      JSON.stringify(
+        encodeConfig(persistentConfig),
+        null,
+        2
+      ),
+      {
+        mode: 0o600,
+        encoding: "utf-8",
+      }
+    );
     // `mode` only applies when writeFileSync creates the file. A leftover or
     // pre-created tmp file keeps its old mode and would carry it onto
     // config.json via the rename, so set it explicitly.
@@ -257,10 +359,16 @@ export function loadConfigToEnv() {
     return false;
   }
 
-  const config = readConfig();
-  if (!config) {
-    logger.warn("No config found to load into process.env");
-    return false;
+  const storedConfig = readConfig() || {};
+  const config = applyAuthoritativeEnvironment({
+    ...configTemplate,
+    ...storedConfig,
+  });
+
+  if (Object.keys(storedConfig).length === 0) {
+    logger.info(
+      "No config.json found; using defaults and protected environment values."
+    );
   }
 
   // --- SCHEMA VALIDATION (warn-only, non-fatal) ---
@@ -392,11 +500,19 @@ export function loadConfigToEnv() {
 
   // --- LOAD INTO PROCESS.ENV ---
   for (const [key, value] of Object.entries(config)) {
-    // Convert objects/arrays to JSON strings to avoid "[object Object]"
-    process.env[key] =
-      typeof value === "object" ? JSON.stringify(value) : String(value);
-  }
+    if (
+      ENV_AUTHORITATIVE_FIELDS.has(key) &&
+      typeof process.env[key] === "string" &&
+      process.env[key].trim() !== ""
+    ) {
+      continue;
+    }
 
+    process.env[key] =
+      typeof value === "object"
+        ? JSON.stringify(value)
+        : String(value);
+  }
   logger.debug(
     `Config loaded into process.env (${Object.keys(config).length} keys)`
   );

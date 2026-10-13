@@ -4,27 +4,22 @@
 # Environment variables
 .env
 config.json
-
 # Logs
 logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
 # System files
 .DS_Store
-
 # IDE
 .claude
 .idea/
 .vscode/
 .code-reviewer-graph
-
 # Testing
 coverage/
 .nyc_output/
-
 # Local notes
 TODO.md
 SRP_ANALYSIS.md
@@ -33,3 +28,8 @@ docs/
 config/dedup-*.json
 .worktrees/
 PRODUCT.md
+# ForFlower runtime configuration and state
+*.env
+config/
+anchorr-data/
+pending-requests.json
