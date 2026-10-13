@@ -51,3 +51,13 @@ export function getRequestCorrelation(tmdbId, mediaType) {
   const value = correlations.get(correlationKey);
   return value ? { ...value, discordUserIds: [...value.discordUserIds] } : null;
 }
+
+export function listRequestCorrelations() {
+  return correlations.keys()
+    .map((correlationKey) => correlations.get(correlationKey))
+    .filter(Boolean)
+    .map((value) => ({
+      ...value,
+      discordUserIds: [...value.discordUserIds],
+    }));
+}

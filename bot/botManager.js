@@ -13,6 +13,7 @@ import { loadConfigToEnv } from "../utils/configFile.js";
 import logger from "../utils/logger.js";
 import { startInviteReconciler } from "./inviteReconciler.js";
 import { registerMemberLifecycle } from "./memberLifecycle.js";
+import { startArrSupervisor } from "./arrSupervisor.js";
 
 export async function startBot() {
   if (botState.isBotRunning && botState.discordClient) {
@@ -77,6 +78,7 @@ export async function startBot() {
       scheduleDailyRandomPick(client);
       startRoundupScheduler(client);
       startInviteReconciler(client);
+      startArrSupervisor(client);
 
       resolve({ success: true, message: `Logged in as ${client.user.tag}` });
     });
