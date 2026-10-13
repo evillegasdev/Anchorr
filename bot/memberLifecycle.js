@@ -1,6 +1,8 @@
 import logger from "../utils/logger.js";
 import { deleteInvitation, listInvitations, listWizarrUsers } from "../api/wizarr.js";
 import { deleteJellyfinUser, resolveJellyfinUser } from "../api/jellyfinUsers.js";
+import { removeDiscordIdFromSeerrUser } from "../api/seerrUsers.js";
+import { deleteUserMapping } from "../utils/userMappingStore.js";
 import {
   getLatestInviteRecordForDiscordUser,
   isActiveInviteStatus,
@@ -70,6 +72,16 @@ async function deleteMappedJellyfinAccount(client, record, discordUserId, discor
   }
 
   if (jellyfinUserId) {
+    if (record.seerrUserId) {
+      try {
+        await removeDiscordIdFromSeerrUser(record.seerrUserId, discordUserId);
+      } catch (error) {
+        logger.warn(`[MEMBERSHIP] Seerr Discord ID cleanup failed: ${error.message}`);
+      }
+    }
+    try { deleteUserMapping(discordUserId); }
+    catch (error) { logger.warn(`[MEMBERSHIP] Local Seerr mapping cleanup failed: ${error.message}`); }
+
     const deletion = await deleteJellyfinUser(jellyfinUserId);
     updateInviteRecord(record.id, {
       status: "departed_deleted",
@@ -78,6 +90,12 @@ async function deleteMappedJellyfinAccount(client, record, discordUserId, discor
       jellyfinUsername: username || deletion.username || null,
       departedAt: new Date().toISOString(),
       lastError: null,
+      seerrAssociationStatus: record.seerrUserId
+        ? "removed"
+        : record.seerrAssociationStatus,
+      seerrRemovedAt: record.seerrUserId
+        ? new Date().toISOString()
+        : null,
     });
     await sendAudit(client, {
       result: "jellyfin-user-deleted",

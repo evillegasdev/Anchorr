@@ -1,7 +1,17 @@
 import logger from "../utils/logger.js";
 import { listInvitations, listWizarrUsers } from "../api/wizarr.js";
 import { resolveJellyfinUser, enforceForFlowerUserPolicy } from "../api/jellyfinUsers.js";
-import { listReconcileableRecords, updateInviteRecord } from "./inviteState.js";
+import {
+  listReconcileableRecords,
+  listPendingSeerrAssociationRecords,
+  updateInviteRecord,
+} from "./inviteState.js";
+import {
+  findSeerrUserByJellyfinId,
+  importJellyfinUserIntoSeerr,
+  associateDiscordIdWithSeerrUser,
+} from "../api/seerrUsers.js";
+import { saveUserMapping } from "../utils/userMappingStore.js";
 
 const POLL_MS = 15000;
 let timer = null;
@@ -78,8 +88,77 @@ async function processRecord(record, invitations, wizarrUsers) {
 
   const verification = await enforceForFlowerUserPolicy(jellyfinUser);
   await completeDiscord(record, verification.username);
-  updateInviteRecord(record.id, { status: "completed", jellyfinUserId: verification.userId, jellyfinUsername: verification.username, completedAt: new Date().toISOString(), lastError: null });
-  await audit({ ...record, result: "completed", detail: "Jellyfin policy verified and Discord roles updated", username: verification.username });
+  const completedRecord = updateInviteRecord(record.id, {
+    status: "completed",
+    jellyfinUserId: verification.userId,
+    jellyfinUsername: verification.username,
+    completedAt: new Date().toISOString(),
+    lastError: null,
+  });
+  await audit({ ...completedRecord, result: "completed", detail: "Jellyfin policy verified and Discord roles updated", username: verification.username });
+  try {
+    await associateSeerr(completedRecord);
+  } catch (error) {
+    logger.warn(`[RECONCILE] Initial Seerr association deferred: ${error.message}`);
+    updateInviteRecord(record.id, {
+      seerrAssociationStatus: "pending",
+      seerrLastError: error.message,
+    });
+  }
+}
+
+async function associateSeerr(record) {
+  let seerrUser = await findSeerrUserByJellyfinId(record.jellyfinUserId);
+  if (!seerrUser) {
+    updateInviteRecord(record.id, {
+      seerrAssociationStatus: "importing",
+      seerrLastError: null,
+    });
+
+    await importJellyfinUserIntoSeerr(record.jellyfinUserId);
+    seerrUser = await findSeerrUserByJellyfinId(record.jellyfinUserId);
+
+    if (!seerrUser) {
+      throw new Error("Seerr import completed but the Jellyfin-linked user was not found");
+    }
+  }
+
+  await associateDiscordIdWithSeerrUser(seerrUser.id, record.discordUserId);
+  saveUserMapping({
+    discordUserId: record.discordUserId,
+    seerrUserId: seerrUser.id,
+    discordUsername: null,
+    discordDisplayName: record.discordDisplayName || null,
+    seerrDisplayName: seerrUser.displayName || seerrUser.username || `User ${seerrUser.id}`,
+  });
+  updateInviteRecord(record.id, {
+    seerrUserId: seerrUser.id,
+    seerrAssociationStatus: "completed",
+    seerrLastError: null,
+    seerrAssociatedAt: new Date().toISOString(),
+  });
+  await audit({
+    ...record,
+    result: "seerr-associated",
+    detail: "Discord identity associated with Seerr; native Seerr Discord delivery remains disabled",
+    username: record.jellyfinUsername,
+  });
+  return true;
+}
+
+async function retryPendingSeerrAssociations() {
+  const records = listPendingSeerrAssociationRecords();
+  for (const record of records) {
+    try {
+      await associateSeerr(record);
+    } catch (error) {
+      logger.warn(`[RECONCILE] Seerr association pending for ${record.id}: ${error.message}`);
+      updateInviteRecord(record.id, {
+        seerrAssociationStatus: "pending",
+        seerrLastError: error.message,
+      });
+    }
+  }
 }
 
 async function tick() {
@@ -87,16 +166,18 @@ async function tick() {
   running = true;
   try {
     const records = listReconcileableRecords();
-    if (records.length === 0) return;
-    const [invitations, users] = await Promise.all([listInvitations(), listWizarrUsers()]);
-    for (const record of records) {
+    if (records.length > 0) {
+      const [invitations, users] = await Promise.all([listInvitations(), listWizarrUsers()]);
+      for (const record of records) {
       try { await processRecord(record, invitations, users); }
       catch (error) {
         logger.error(`[RECONCILE] Record ${record.id} failed: ${error.message}`);
         updateInviteRecord(record.id, { status: "waiting_identity", attempts: record.attempts + 1, lastError: error.message });
         await audit({ ...record, result: "failed", detail: error.message });
       }
+      }
     }
+    await retryPendingSeerrAssociations();
   } catch (error) { logger.error(`[RECONCILE] Poll failed: ${error.message}`); }
   finally { running = false; }
 }

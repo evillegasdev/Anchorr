@@ -49,6 +49,7 @@ export function createInviteRecord({ invitationId, discordUserId, discordDisplay
     guildId, sourceChannelId,
     status: "pending", createdAt: new Date().toISOString(), attempts: 0,
     lastError: null, wizarrUserId: null, jellyfinUserId: null, jellyfinUsername: null,
+    seerrUserId: null, seerrAssociationStatus: "pending", seerrLastError: null,
     completedAt: null,
   };
   records.push(record); save(); return { ...record };
@@ -78,4 +79,14 @@ export function getLatestInviteRecordForDiscordUser(discordUserId) {
 
 export function isActiveInviteStatus(status) {
   return ["pending", "processing", "waiting_identity"].includes(status);
+}
+
+export function listPendingSeerrAssociationRecords() {
+  return records
+    .filter((record) =>
+      record.status === "completed" &&
+      record.jellyfinUserId &&
+      record.seerrAssociationStatus !== "completed"
+    )
+    .map((record) => ({ ...record }));
 }
