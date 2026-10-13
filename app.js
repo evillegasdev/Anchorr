@@ -7,6 +7,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
 import { handleJellyfinWebhook } from "./jellyfinWebhook.js";
+import { handleSeerrWebhook } from "./seerrWebhook.js";
 import { configTemplate } from "./lib/config.js";
 import { sendDailyRandomPick } from "./bot/dailyPick.js";
 import { sendWeeklyRoundupTest } from "./bot/weeklyRoundup.js";
@@ -586,6 +587,31 @@ function configureWebServer() {
       // Don't send error response since we already sent 200
     }
   });
+
+  // --- SEERR WEBHOOK ENDPOINT ---
+  app.post(
+    "/seerr-webhook",
+    webhookLimiter,
+    verifyWebhookSecret,
+    express.json({ type: "application/json", limit: "256kb" }),
+    async (req, res) => {
+      try {
+        if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+          return res.status(400).json({ success: false, error: "Invalid JSON payload" });
+        }
+
+        res.status(202).json({ success: true, message: "Webhook accepted" });
+
+        if (botState.discordClient && botState.isBotRunning) {
+          await handleSeerrWebhook(req.body, botState.discordClient);
+        } else {
+          logger.warn("[SEERR WEBHOOK] Discord bot is not running; event dropped");
+        }
+      } catch (error) {
+        logger.error(`[SEERR WEBHOOK] Processing failed: ${error.message}`);
+      }
+    }
+  );
 
   app.post(
     "/api/save-config",

@@ -90,3 +90,10 @@ export function listPendingSeerrAssociationRecords() {
     )
     .map((record) => ({ ...record }));
 }
+
+export function getLatestInviteRecordForJellyfinUser(jellyfinUserId) {
+  const matches = records
+    .filter((record) => record.jellyfinUserId === jellyfinUserId)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  return matches[0] ? { ...matches[0] } : null;
+}
