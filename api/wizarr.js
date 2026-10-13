@@ -243,6 +243,24 @@ export async function createForFlowerInvitation() {
   }
 }
 
+export async function listInvitations() {
+  const configuration = getConfiguration();
+  try {
+    const response = await createClient(configuration).get("/invitations");
+    if (!Array.isArray(response.data?.invitations)) throw new Error("Wizarr returned an invalid invitation list");
+    return response.data.invitations;
+  } catch (error) { throw toSafeApiError(error); }
+}
+
+export async function listWizarrUsers() {
+  const configuration = getConfiguration();
+  try {
+    const response = await createClient(configuration).get("/users");
+    if (!Array.isArray(response.data?.users)) throw new Error("Wizarr returned an invalid user list");
+    return response.data.users;
+  } catch (error) { throw toSafeApiError(error); }
+}
+
 export async function deleteInvitation(
   invitationId
 ) {

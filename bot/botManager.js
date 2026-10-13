@@ -11,6 +11,8 @@ import { scheduleDailyRandomPick } from "./dailyPick.js";
 import { start as startRoundupScheduler } from "./roundupScheduler.js";
 import { loadConfigToEnv } from "../utils/configFile.js";
 import logger from "../utils/logger.js";
+import { startInviteReconciler } from "./inviteReconciler.js";
+import { registerMemberLifecycle } from "./memberLifecycle.js";
 
 export async function startBot() {
   if (botState.isBotRunning && botState.discordClient) {
@@ -62,6 +64,7 @@ export async function startBot() {
 
   // ----------------- REGISTER INTERACTIONS -----------------
   registerInteractions(client);
+  registerMemberLifecycle(client);
 
   // ----------------- LOGIN -----------------
   return new Promise((resolve, reject) => {
@@ -73,6 +76,7 @@ export async function startBot() {
 
       scheduleDailyRandomPick(client);
       startRoundupScheduler(client);
+      startInviteReconciler(client);
 
       resolve({ success: true, message: `Logged in as ${client.user.tag}` });
     });

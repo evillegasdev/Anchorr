@@ -2,6 +2,7 @@ import { ActionRowBuilder, StringSelectMenuBuilder } from "discord.js";
 import * as tmdbApi from "../api/tmdb.js";
 import * as seerrApi from "../api/seerr.js";
 import { createForFlowerInvitation, deleteInvitation } from "../api/wizarr.js";
+import { createInviteRecord, removeInviteRecord, hasActiveInviteForDiscordUser } from "./inviteState.js";
 import { fetchOMDbData } from "../api/omdb.js";
 import { buildNotificationEmbed, buildButtons } from "./embeds.js";
 import {
@@ -342,14 +343,32 @@ async function handleInvite(interaction) {
   if (!memberHasRole(interaction, process.env.DISCORD_PENDING_ONBOARDING_ROLE_ID) && !interaction.memberPermissions?.has("Administrator"))
     return interaction.reply({ content: "❌ Your account is not eligible for media onboarding.", flags: 64 });
 
+  if (hasActiveInviteForDiscordUser(interaction.user.id)) {
+    return interaction.reply({ content: "ℹ️ You already have an invitation awaiting redemption or reconciliation.", flags: 64 });
+  }
+
   await interaction.deferReply({ flags: 64 });
   let invitation = null;
+  let reconciliation = null;
   try {
     invitation = await createForFlowerInvitation();
+    try {
+      reconciliation = createInviteRecord({
+        invitationId: invitation.id,
+        discordUserId: interaction.user.id,
+        discordDisplayName: interaction.member?.displayName || interaction.user.globalName || interaction.user.username,
+        guildId: interaction.guildId,
+        sourceChannelId: interaction.channelId,
+      });
+    } catch (stateError) {
+      try { await deleteInvitation(invitation.id); } catch (_) {}
+      throw new Error(`Invitation state could not be persisted: ${stateError.message}`);
+    }
     try {
       await interaction.user.send({ content: ["**Your private ForFlower invitation**", "", invitation.url, "", "This link is intended only for your account.", "It expires after the configured invitation period and should work only once.", "Do not post or forward this link."].join("\n") });
     } catch (dmError) {
       try { await deleteInvitation(invitation.id); } catch (e) { logger.error(`[INVITE] Revoke failed: ${e.message}`); }
+      if (reconciliation) removeInviteRecord(reconciliation.id);
       await sendInviteAudit(interaction.client, { userId: interaction.user.id, guildId: interaction.guildId, channelId: interaction.channelId, invitationId: invitation.id, result: "failed", detail: "Discord DM failed; invitation revoked" });
       return interaction.editReply({ content: "❌ I could not send you a direct message. Enable DMs from server members, then run `/invite` again." });
     }
@@ -360,6 +379,46 @@ async function handleInvite(interaction) {
     await sendInviteAudit(interaction.client, { userId: interaction.user.id, guildId: interaction.guildId, channelId: interaction.channelId, invitationId: invitation?.id || null, result: "failed", detail: "Wizarr invitation creation failed" });
     return interaction.editReply({ content: "❌ The invitation service is unavailable. An administrator has been notified." });
   }
+}
+
+const MEDIA_COMMANDS = new Set(["request", "search", "trending"]);
+
+function isTestingChannel(interaction) {
+  return Boolean(
+    process.env.DISCORD_BOT_TESTING_CHANNEL_ID &&
+    interaction.channelId === process.env.DISCORD_BOT_TESTING_CHANNEL_ID
+  );
+}
+
+function isInviteChannel(interaction) {
+  return Boolean(
+    process.env.DISCORD_GET_ACCESS_CHANNEL_ID &&
+    interaction.channelId === process.env.DISCORD_GET_ACCESS_CHANNEL_ID
+  );
+}
+
+function isRequestsChannel(interaction) {
+  return Boolean(
+    process.env.DISCORD_REQUESTS_CHANNEL_ID &&
+    interaction.channelId === process.env.DISCORD_REQUESTS_CHANNEL_ID
+  );
+}
+
+function isCommandAllowedInChannel(interaction) {
+  if (isTestingChannel(interaction)) return true;
+  if (interaction.commandName === "invite") return isInviteChannel(interaction);
+  if (MEDIA_COMMANDS.has(interaction.commandName)) return isRequestsChannel(interaction);
+  return true;
+}
+
+function commandChannelError(commandName) {
+  if (commandName === "invite") {
+    return "❌ Use `/invite` in the designated get-access channel.";
+  }
+  if (MEDIA_COMMANDS.has(commandName)) {
+    return "❌ Use media search and request commands in the designated requests channel.";
+  }
+  return "❌ This command is not available in this channel.";
 }
 
 // ----------------- REGISTER INTERACTIONS -----------------
@@ -383,6 +442,9 @@ export function registerInteractions(client) {
 
       // Autocomplete
       if (interaction.isAutocomplete()) {
+        if (!isTestingChannel(interaction) && !isRequestsChannel(interaction)) {
+          return interaction.respond([]);
+        }
         const focusedOption = interaction.options.getFocused(true);
         const focusedValue = focusedOption.value;
 
@@ -620,6 +682,13 @@ export function registerInteractions(client) {
 
       // Commands
       if (interaction.isCommand()) {
+        if (!isCommandAllowedInChannel(interaction)) {
+          return interaction.reply({
+            content: commandChannelError(interaction.commandName),
+            flags: 64,
+          });
+        }
+
         if (interaction.commandName === "invite") return handleInvite(interaction);
 
         if (!getSeerrUrl() || !getSeerrApiKey() || !getTmdbApiKey()) {
