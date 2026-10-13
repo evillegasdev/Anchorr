@@ -3,6 +3,7 @@ import logger from "./utils/logger.js";
 import { PersistentMap } from "./utils/persistentMap.js";
 import { getUserMappings } from "./utils/userMappingStore.js";
 import { getLatestInviteRecordForJellyfinUser } from "./bot/inviteState.js";
+import { saveRequestCorrelation } from "./utils/requestCorrelationStore.js";
 
 const SUPPORTED_TYPES = new Set([
   "MEDIA_PENDING",
@@ -120,6 +121,15 @@ export async function handleSeerrWebhook(payload, client) {
   if (!channel?.isTextBased()) throw new Error("Request-status channel is not text-capable");
 
   const requesterId = resolveDiscordId(normalized);
+  if (requesterId && normalized.tmdbId && ["movie", "tv"].includes(normalized.mediaType)) {
+    saveRequestCorrelation({
+      tmdbId: normalized.tmdbId,
+      mediaType: normalized.mediaType,
+      requestId: normalized.requestId,
+      discordUserIds: [requesterId],
+      status: notificationType === "MEDIA_AVAILABLE" ? "available" : notificationType,
+    });
+  }
   const [title, color] = eventMetadata(notificationType);
   const detail = normalized.message || normalized.event;
   const embed = new EmbedBuilder()

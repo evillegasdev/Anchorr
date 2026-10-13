@@ -8,6 +8,7 @@ import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
 import { handleJellyfinWebhook } from "./jellyfinWebhook.js";
 import { handleSeerrWebhook } from "./seerrWebhook.js";
+import { handleArrWebhook } from "./arrWebhook.js";
 import { configTemplate } from "./lib/config.js";
 import { sendDailyRandomPick } from "./bot/dailyPick.js";
 import { sendWeeklyRoundupTest } from "./bot/weeklyRoundup.js";
@@ -549,7 +550,12 @@ function configureWebServer() {
       providedBuf.length === expectedBuf.length &&
       crypto.timingSafeEqual(providedBuf, expectedBuf);
     if (!valid) {
-      logger.warn(`⚠️ Webhook rejected: invalid or missing X-Webhook-Secret (from ${req.ip})`);
+      logger.warn(
+        `⚠️ Webhook rejected: invalid or missing X-Webhook-Secret ` +
+        `(from ${req.ip}; present=${Boolean(provided)}; ` +
+        `providedLength=${providedBuf.length}; expectedLength=${expectedBuf.length}; ` +
+        `userAgent=${String(req.headers["user-agent"] || "unknown").slice(0, 80)})`
+      );
       return res.status(401).json({ success: false, error: "Unauthorized" });
     }
     next();
@@ -609,6 +615,29 @@ function configureWebServer() {
         }
       } catch (error) {
         logger.error(`[SEERR WEBHOOK] Processing failed: ${error.message}`);
+      }
+    }
+  );
+
+  // --- RADARR / SONARR WEBHOOK ENDPOINT ---
+  app.post(
+    "/arr-webhook",
+    webhookLimiter,
+    verifyWebhookSecret,
+    express.json({ type: "application/json", limit: "256kb" }),
+    async (req, res) => {
+      try {
+        if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+          return res.status(400).json({ success: false, error: "Invalid JSON payload" });
+        }
+        res.status(202).json({ success: true, message: "Webhook accepted" });
+        if (botState.discordClient && botState.isBotRunning) {
+          await handleArrWebhook(req.body, botState.discordClient, pendingRequests);
+        } else {
+          logger.warn("[ARR WEBHOOK] Discord bot is not running; event dropped");
+        }
+      } catch (error) {
+        logger.error(`[ARR WEBHOOK] Processing failed: ${error.message}`);
       }
     }
   );
