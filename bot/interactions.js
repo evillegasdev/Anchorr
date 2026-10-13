@@ -1,6 +1,7 @@
 import { ActionRowBuilder, StringSelectMenuBuilder } from "discord.js";
 import * as tmdbApi from "../api/tmdb.js";
 import * as seerrApi from "../api/seerr.js";
+import { createForFlowerInvitation, deleteInvitation } from "../api/wizarr.js";
 import { fetchOMDbData } from "../api/omdb.js";
 import { buildNotificationEmbed, buildButtons } from "./embeds.js";
 import {
@@ -313,13 +314,61 @@ async function handleSearchOrRequest(
   }
 }
 
+function memberHasRole(interaction, roleId) {
+  return Boolean(roleId && interaction.member?.roles?.cache?.has(roleId));
+}
+
+async function sendInviteAudit(client, event) {
+  const id = process.env.DISCORD_INVITE_AUDIT_CHANNEL_ID;
+  if (!id) return logger.warn("[INVITE] Audit channel is not configured");
+  try {
+    const channel = await client.channels.fetch(id);
+    if (!channel?.isTextBased()) return logger.error("[INVITE] Audit channel is not text-capable");
+    const lines = ["**ForFlower invitation event**", `Result: ${event.result}`, `Discord user: <@${event.userId}>`, `Guild ID: ${event.guildId}`, `Source channel ID: ${event.channelId}`];
+    if (event.invitationId) lines.push(`Wizarr invitation ID: ${event.invitationId}`);
+    if (event.detail) lines.push(`Detail: ${event.detail}`);
+    await channel.send({ content: lines.join("\n"), allowedMentions: { users: [], roles: [] } });
+  } catch (error) { logger.error(`[INVITE] Audit failure: ${error.message}`); }
+}
+
+async function handleInvite(interaction) {
+  const allowed = new Set([process.env.DISCORD_GET_ACCESS_CHANNEL_ID, process.env.DISCORD_BOT_TESTING_CHANNEL_ID].filter(Boolean));
+  if (!interaction.inGuild() || interaction.guildId !== process.env.DISCORD_GUILD_ID)
+    return interaction.reply({ content: "❌ This command can only be used in the ForFlower server.", flags: 64 });
+  if (!allowed.has(interaction.channelId))
+    return interaction.reply({ content: "❌ Use this command in the designated access channel.", flags: 64 });
+  if (memberHasRole(interaction, process.env.DISCORD_MEDIA_MEMBER_ROLE_ID))
+    return interaction.reply({ content: "ℹ️ Your Discord account already has media access.", flags: 64 });
+  if (!memberHasRole(interaction, process.env.DISCORD_PENDING_ONBOARDING_ROLE_ID) && !interaction.memberPermissions?.has("Administrator"))
+    return interaction.reply({ content: "❌ Your account is not eligible for media onboarding.", flags: 64 });
+
+  await interaction.deferReply({ flags: 64 });
+  let invitation = null;
+  try {
+    invitation = await createForFlowerInvitation();
+    try {
+      await interaction.user.send({ content: ["**Your private ForFlower invitation**", "", invitation.url, "", "This link is intended only for your account.", "It expires after the configured invitation period and should work only once.", "Do not post or forward this link."].join("\n") });
+    } catch (dmError) {
+      try { await deleteInvitation(invitation.id); } catch (e) { logger.error(`[INVITE] Revoke failed: ${e.message}`); }
+      await sendInviteAudit(interaction.client, { userId: interaction.user.id, guildId: interaction.guildId, channelId: interaction.channelId, invitationId: invitation.id, result: "failed", detail: "Discord DM failed; invitation revoked" });
+      return interaction.editReply({ content: "❌ I could not send you a direct message. Enable DMs from server members, then run `/invite` again." });
+    }
+    await sendInviteAudit(interaction.client, { userId: interaction.user.id, guildId: interaction.guildId, channelId: interaction.channelId, invitationId: invitation.id, result: "created", detail: "Invitation delivered through Discord DM" });
+    return interaction.editReply({ content: "✅ Your private invitation was sent by direct message. Do not share the link." });
+  } catch (error) {
+    logger.error(`[INVITE] Creation failed for ${interaction.user.id}: ${error.message}`);
+    await sendInviteAudit(interaction.client, { userId: interaction.user.id, guildId: interaction.guildId, channelId: interaction.channelId, invitationId: invitation?.id || null, result: "failed", detail: "Wizarr invitation creation failed" });
+    return interaction.editReply({ content: "❌ The invitation service is unavailable. An administrator has been notified." });
+  }
+}
+
 // ----------------- REGISTER INTERACTIONS -----------------
 export function registerInteractions(client) {
   client.on("interactionCreate", async (interaction) => {
     try {
       // Check role permissions for all commands
       if (
-        interaction.isCommand() ||
+        (interaction.isCommand() && interaction.commandName !== "invite") ||
         (interaction.isStringSelectMenu() &&
           !interaction.customId.startsWith("request_seasons|") &&
           !interaction.customId.startsWith("request_with_tags|"))
@@ -571,6 +620,8 @@ export function registerInteractions(client) {
 
       // Commands
       if (interaction.isCommand()) {
+        if (interaction.commandName === "invite") return handleInvite(interaction);
+
         if (!getSeerrUrl() || !getSeerrApiKey() || !getTmdbApiKey()) {
           return interaction.reply({
             content:

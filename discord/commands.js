@@ -68,6 +68,9 @@ export function getCommands() {
           .setRequired(true)
           .setAutocomplete(true)
       ),
+    new SlashCommandBuilder()
+      .setName("invite")
+      .setDescription("Send yourself a private one-time ForFlower invitation"),
   ].map((c) => c.toJSON());
 }
 
@@ -82,33 +85,16 @@ export async function registerCommands(rest, botId, guildId, logger) {
   try {
     const commands = getCommands();
 
-    // Try global commands first (takes up to 1 hour to update globally)
-    try {
-      const globalEndpoint = `/applications/${botId}/commands`;
-      await rest.put(globalEndpoint, { body: commands });
-      logger.info("✅ Global commands registered successfully!");
-      return; // Success, exit early
-    } catch (globalErr) {
-      // Only attempt guild-specific fallback if guildId is provided
-      if (!guildId) {
-        logger.error(
-          `Global command registration failed: ${globalErr.message} — slash commands may not appear in Discord.`
-        );
-        logger.warn(
-          `To fix: add your server ID as GUILD_ID in config.json for immediate guild-specific registration.`
-        );
-        return;
-      }
-
-      logger.warn(
-        `Global registration failed, falling back to guild-specific: ${globalErr.message}`
-      );
-
-      // Fallback to guild-specific commands
+    if (guildId) {
       const guildEndpoint = `/applications/${botId}/guilds/${guildId}/commands`;
       await rest.put(guildEndpoint, { body: commands });
       logger.info("✅ Guild commands registered successfully!");
+      return;
     }
+
+    const globalEndpoint = `/applications/${botId}/commands`;
+    await rest.put(globalEndpoint, { body: commands });
+    logger.info("✅ Global commands registered successfully!");
   } catch (err) {
     logger.error(`❌ Failed to register Discord commands: ${err.message}`);
     if (err.response) {
