@@ -115,11 +115,6 @@ export async function handleSeerrWebhook(payload, client) {
     return { duplicate: true };
   }
 
-  const channelId = process.env.DISCORD_REQUEST_STATUS_CHANNEL_ID;
-  if (!channelId) throw new Error("DISCORD_REQUEST_STATUS_CHANNEL_ID is not configured");
-  const channel = await client.channels.fetch(channelId);
-  if (!channel?.isTextBased()) throw new Error("Request-status channel is not text-capable");
-
   const requesterId = resolveDiscordId(normalized);
   if (requesterId && normalized.tmdbId && ["movie", "tv"].includes(normalized.mediaType)) {
     saveRequestCorrelation({
@@ -130,6 +125,18 @@ export async function handleSeerrWebhook(payload, client) {
       status: notificationType === "MEDIA_AVAILABLE" ? "available" : notificationType,
     });
   }
+
+  if (notificationType === "MEDIA_AUTO_APPROVED") {
+    eventDedup.set(key, { type: notificationType, sentAt: new Date().toISOString() });
+    logger.info(`[SEERR WEBHOOK] Suppressed MEDIA_AUTO_APPROVED request=${normalized.requestId || "unknown"} requester=${requesterId || "unresolved"}`);
+    return { suppressed: true, requesterId };
+  }
+
+  const channelId = process.env.DISCORD_REQUEST_STATUS_CHANNEL_ID;
+  if (!channelId) throw new Error("DISCORD_REQUEST_STATUS_CHANNEL_ID is not configured");
+  const channel = await client.channels.fetch(channelId);
+  if (!channel?.isTextBased()) throw new Error("Request-status channel is not text-capable");
+
   const [title, color] = eventMetadata(notificationType);
   const detail = normalized.message || normalized.event;
   const embed = new EmbedBuilder()

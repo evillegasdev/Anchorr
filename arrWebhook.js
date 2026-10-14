@@ -2,6 +2,7 @@ import { EmbedBuilder } from "discord.js";
 import logger from "./utils/logger.js";
 import { PersistentMap } from "./utils/persistentMap.js";
 import { getRequestCorrelation } from "./utils/requestCorrelationStore.js";
+import { queueDelayedGrab } from "./bot/arrGrabNotifier.js";
 
 const SUPPORTED = new Set([
   "Grab", "Download", "ImportComplete", "HealthIssue",
@@ -47,6 +48,7 @@ async function mediaIdentity(payload, app) {
       tmdbId:positive(payload.movie?.tmdbId || payload.remoteMovie?.tmdbId),
       title:clean(payload.movie?.title || payload.remoteMovie?.title,256),
       year:positive(payload.movie?.year || payload.remoteMovie?.year),
+      localId:positive(payload.movie?.id),
     };
   }
   const tvdbId=positive(payload.series?.tvdbId);
@@ -56,6 +58,7 @@ async function mediaIdentity(payload, app) {
     tvdbId,
     title:clean(payload.series?.title,256),
     year:positive(payload.series?.year),
+    localId:positive(payload.series?.id),
   };
 }
 function eventInfo(type, app) {
@@ -96,6 +99,11 @@ export async function handleArrWebhook(payload,client,pendingRequests) {
     logger.info(`[ARR WEBHOOK] Duplicate suppressed: ${key}`);
     return { duplicate:true };
   }
+  if (["Download", "ImportComplete"].includes(type)) {
+    dedup.set(key,{type,sentAt:new Date().toISOString(),suppressed:true});
+    logger.info(`[ARR WEBHOOK] Suppressed ${app} ${type} media=${media.tmdbId||media.tvdbId||"unknown"}; Seerr MEDIA_AVAILABLE remains authoritative`);
+    return {suppressed:true};
+  }
   const channelId=process.env.DISCORD_REQUEST_STATUS_CHANNEL_ID;
   if (!channelId) throw new Error("DISCORD_REQUEST_STATUS_CHANNEL_ID is not configured");
   const channel=await client.channels.fetch(channelId);
@@ -111,6 +119,25 @@ export async function handleArrWebhook(payload,client,pendingRequests) {
     ...legacyRequesterIds,
     ...(correlation?.discordUserIds || []),
   ])];
+  if (type === "Grab") {
+    queueDelayedGrab({
+      dedupKey:key,
+      app,
+      tmdbId:media.tmdbId,
+      tvdbId:media.tvdbId,
+      localId:media.localId,
+      mediaType:media.type,
+      title:media.title,
+      year:media.year,
+      releaseTitle:clean(payload.release?.releaseTitle || payload.release?.indexer,1000),
+      downloadClient:clean(payload.downloadClient,100),
+      downloadId:clean(payload.downloadId,200),
+      requesterIds,
+    });
+    dedup.set(key,{type,sentAt:new Date().toISOString(),delayed:true});
+    logger.info(`[ARR WEBHOOK] Queued delayed ${app} Grab media=${media.tmdbId||media.tvdbId||"unknown"} requesters=${requesterIds.length}`);
+    return {queued:true,requesterIds};
+  }
   const [title,color]=eventInfo(type,app);
   const subject=media.title ? `${media.title}${media.year ? ` (${media.year})` : ""}` : (clean(payload.sourceTitle,256)||"Arr status update");
   const embed=new EmbedBuilder().setTitle(title).setDescription(subject).setColor(color).setTimestamp();
