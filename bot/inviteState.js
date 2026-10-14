@@ -97,3 +97,21 @@ export function getLatestInviteRecordForJellyfinUser(jellyfinUserId) {
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
   return matches[0] ? { ...matches[0] } : null;
 }
+
+export function listCompletedManagedRecords() {
+  const latestByDiscordUser = new Map();
+  for (const record of records) {
+    const existing = latestByDiscordUser.get(record.discordUserId);
+    if (!existing || String(record.createdAt).localeCompare(String(existing.createdAt)) > 0) {
+      latestByDiscordUser.set(record.discordUserId, record);
+    }
+  }
+  return [...latestByDiscordUser.values()]
+    .filter((record) =>
+      record.status === "completed" &&
+      record.discordUserId &&
+      record.guildId &&
+      record.jellyfinUserId
+    )
+    .map((record) => ({ ...record }));
+}

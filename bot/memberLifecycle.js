@@ -6,8 +6,17 @@ import { deleteUserMapping } from "../utils/userMappingStore.js";
 import {
   getLatestInviteRecordForDiscordUser,
   isActiveInviteStatus,
+  listCompletedManagedRecords,
   updateInviteRecord,
 } from "./inviteState.js";
+
+const DEPARTURE_RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
+const DEPARTURE_RECONCILE_INITIAL_DELAY_MS = 30 * 1000;
+const departureCleanupInFlight = new Set();
+let departureReconcileTimer = null;
+let departureReconcileInitialTimer = null;
+let departureReconcileRunning = false;
+let lifecycleClient = null;
 
 function parseWizarrUserId(value) {
   if (typeof value !== "string") return null;
@@ -136,6 +145,89 @@ async function deleteMappedJellyfinAccount(client, record, discordUserId, discor
   });
 }
 
+async function cleanupManagedDeparture(client, record, discordUserId, discordDisplayName) {
+  if (departureCleanupInFlight.has(discordUserId)) {
+    logger.info(`[MEMBERSHIP] Cleanup already in progress for ${discordUserId}; duplicate trigger suppressed`);
+    return;
+  }
+  departureCleanupInFlight.add(discordUserId);
+  try {
+    await deleteMappedJellyfinAccount(
+      client,
+      record,
+      discordUserId,
+      discordDisplayName
+    );
+  } finally {
+    departureCleanupInFlight.delete(discordUserId);
+  }
+}
+
+export async function reconcileCompletedMemberDepartures(client) {
+  if (departureReconcileRunning) return;
+  departureReconcileRunning = true;
+  try {
+    const records = listCompletedManagedRecords();
+    for (const record of records) {
+      try {
+        const guild = client.guilds.cache.get(record.guildId) ||
+          await client.guilds.fetch(record.guildId);
+        try {
+          await guild.members.fetch(record.discordUserId);
+          continue;
+        } catch (error) {
+          if (Number(error?.code) !== 10007) {
+            logger.warn(
+              `[MEMBERSHIP RECOVERY] Discord membership check failed for ${record.discordUserId}: ${error.message}`
+            );
+            continue;
+          }
+        }
+
+        logger.warn(
+          `[MEMBERSHIP RECOVERY] Discord definitively reports member ${record.discordUserId} absent; cleaning managed account ${record.jellyfinUsername || record.jellyfinUserId}`
+        );
+        await cleanupManagedDeparture(
+          client,
+          record,
+          record.discordUserId,
+          record.discordDisplayName || record.discordUserId
+        );
+      } catch (error) {
+        logger.error(
+          `[MEMBERSHIP RECOVERY] Cleanup failed for ${record.discordUserId}: ${error.message}`
+        );
+      }
+    }
+  } finally {
+    departureReconcileRunning = false;
+  }
+}
+
+function scheduleCompletedMemberReconciliation(client) {
+  lifecycleClient = client;
+  if (departureReconcileTimer) clearInterval(departureReconcileTimer);
+  if (departureReconcileInitialTimer) clearTimeout(departureReconcileInitialTimer);
+
+  departureReconcileInitialTimer = setTimeout(() => {
+    void reconcileCompletedMemberDepartures(lifecycleClient).catch((error) =>
+      logger.error(`[MEMBERSHIP RECOVERY] Initial pass failed: ${error.message}`)
+    );
+  }, DEPARTURE_RECONCILE_INITIAL_DELAY_MS);
+  departureReconcileInitialTimer.unref?.();
+
+  departureReconcileTimer = setInterval(() => {
+    void reconcileCompletedMemberDepartures(lifecycleClient).catch((error) =>
+      logger.error(`[MEMBERSHIP RECOVERY] Periodic pass failed: ${error.message}`)
+    );
+  }, DEPARTURE_RECONCILE_INTERVAL_MS);
+  departureReconcileTimer.unref?.();
+
+  logger.info(
+    `[MEMBERSHIP RECOVERY] Started with ${DEPARTURE_RECONCILE_INTERVAL_MS / 60000}m polling and ${DEPARTURE_RECONCILE_INITIAL_DELAY_MS / 1000}s initial delay`
+  );
+}
+
 async function handleMemberRemove(client, member) {
   if (member.user?.bot || member.guild.id !== process.env.DISCORD_GUILD_ID) return;
   const record = getLatestInviteRecordForDiscordUser(member.id);
@@ -148,7 +240,7 @@ async function handleMemberRemove(client, member) {
     });
     return;
   }
-  await deleteMappedJellyfinAccount(
+  await cleanupManagedDeparture(
     client,
     record,
     member.id,
@@ -167,5 +259,6 @@ export function registerMemberLifecycle(client) {
       logger.error(`[MEMBERSHIP] guildMemberRemove failed for ${member.id}: ${error.message}`)
     );
   });
+  scheduleCompletedMemberReconciliation(client);
   logger.info("[MEMBERSHIP] Discord member lifecycle handlers registered");
 }
