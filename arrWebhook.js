@@ -4,6 +4,7 @@ import { PersistentMap } from "./utils/persistentMap.js";
 import { getRequestCorrelation } from "./utils/requestCorrelationStore.js";
 import { queueDelayedGrab } from "./bot/arrGrabNotifier.js";
 
+import { queueSeerrRecentlyAddedScan } from "./utils/seerrRecentScanTrigger.js";
 const SUPPORTED = new Set([
   "Grab", "Download", "ImportComplete", "HealthIssue",
   "HealthRestored", "ManualInteractionRequired",
@@ -101,8 +102,14 @@ export async function handleArrWebhook(payload,client,pendingRequests) {
   }
   if (["Download", "ImportComplete"].includes(type)) {
     dedup.set(key,{type,sentAt:new Date().toISOString(),suppressed:true});
-    logger.info(`[ARR WEBHOOK] Suppressed ${app} ${type} media=${media.tmdbId||media.tvdbId||"unknown"}; Seerr MEDIA_AVAILABLE remains authoritative`);
-    return {suppressed:true};
+    queueSeerrRecentlyAddedScan({
+      app,
+      eventType:type,
+      mediaId:media.tmdbId||media.tvdbId||null,
+      title:media.title,
+    });
+    logger.info(`[ARR WEBHOOK] Suppressed ${app} ${type} media=${media.tmdbId||media.tvdbId||"unknown"}; queued fast Seerr Jellyfin Recently Added Scan; Seerr MEDIA_AVAILABLE remains authoritative`);
+    return {suppressed:true,scanQueued:true};
   }
   const channelId=process.env.DISCORD_REQUEST_STATUS_CHANNEL_ID;
   if (!channelId) throw new Error("DISCORD_REQUEST_STATUS_CHANNEL_ID is not configured");
