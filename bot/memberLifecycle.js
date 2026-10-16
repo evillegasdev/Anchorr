@@ -46,18 +46,53 @@ async function sendAudit(client, event) {
 
 async function handleMemberAdd(client, member) {
   if (member.user?.bot || member.guild.id !== process.env.DISCORD_GUILD_ID) return;
+
   const pendingRole = process.env.DISCORD_PENDING_ONBOARDING_ROLE_ID;
   const mediaRole = process.env.DISCORD_MEDIA_MEMBER_ROLE_ID;
-  if (!pendingRole) throw new Error("Pending Onboarding role is not configured");
-  if (mediaRole && member.roles.cache.has(mediaRole)) return;
-  if (!member.roles.cache.has(pendingRole)) {
-    await member.roles.add(pendingRole, "ForFlower automatic onboarding assignment");
+
+  if (!pendingRole) {
+    throw new Error("Pending Onboarding role is not configured");
   }
+
+  if (mediaRole && member.roles.cache.has(mediaRole)) {
+    logger.info(
+      `[MEMBERSHIP] Pending-role assignment skipped; member already has Media Member role discordUserId=${member.id} guildId=${member.guild.id}`
+    );
+    return;
+  }
+
+  let result;
+  let detail;
+
+  if (member.roles.cache.has(pendingRole)) {
+    result = "pending-role-already-present";
+    detail = "New server member already had Pending Onboarding";
+
+    logger.info(
+      `[MEMBERSHIP] Pending Onboarding role already present discordUserId=${member.id} guildId=${member.guild.id} roleId=${pendingRole}`
+    );
+  } else {
+    await member.roles.add(
+      pendingRole,
+      "ForFlower automatic onboarding assignment"
+    );
+
+    result = "pending-role-assigned";
+    detail = "Pending Onboarding assigned to new server member";
+
+    logger.info(
+      `[MEMBERSHIP] Added Pending Onboarding role discordUserId=${member.id} guildId=${member.guild.id} roleId=${pendingRole}`
+    );
+  }
+
   await sendAudit(client, {
-    result: "pending-role-assigned",
+    result,
     discordUserId: member.id,
-    discordDisplayName: member.displayName || member.user.globalName || member.user.username,
-    detail: "Pending Onboarding assigned to new server member",
+    discordDisplayName:
+      member.displayName ||
+      member.user.globalName ||
+      member.user.username,
+    detail,
   });
 }
 
