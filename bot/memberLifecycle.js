@@ -1,7 +1,10 @@
 import logger from "../utils/logger.js";
 import { deleteInvitation, listInvitations, listWizarrUsers } from "../api/wizarr.js";
 import { deleteJellyfinUser, resolveJellyfinUser } from "../api/jellyfinUsers.js";
-import { removeDiscordIdFromSeerrUser } from "../api/seerrUsers.js";
+import {
+  deleteSeerrUser,
+  removeDiscordIdFromSeerrUser,
+} from "../api/seerrUsers.js";
 import { deleteUserMapping } from "../utils/userMappingStore.js";
 import {
   getLatestInviteRecordForDiscordUser,
@@ -119,27 +122,53 @@ async function deleteMappedJellyfinAccount(client, record, discordUserId, discor
     if (record.seerrUserId) {
       try {
         await removeDiscordIdFromSeerrUser(record.seerrUserId, discordUserId);
+        logger.info(
+          `[MEMBERSHIP] Removed Discord association from Seerr user discordUserId=${discordUserId} seerrUserId=${record.seerrUserId} inviteRecordId=${record.id}`
+        );
       } catch (error) {
         logger.warn(`[MEMBERSHIP] Seerr Discord ID cleanup failed: ${error.message}`);
       }
     }
-    try { deleteUserMapping(discordUserId); }
-    catch (error) { logger.warn(`[MEMBERSHIP] Local Seerr mapping cleanup failed: ${error.message}`); }
+
+    try {
+      const mappingDeleted = deleteUserMapping(discordUserId);
+      logger.info(
+        mappingDeleted
+          ? `[MEMBERSHIP] Deleted local Seerr mapping discordUserId=${discordUserId} seerrUserId=${record.seerrUserId || "none"} inviteRecordId=${record.id}`
+          : `[MEMBERSHIP] Local Seerr mapping already absent discordUserId=${discordUserId} seerrUserId=${record.seerrUserId || "none"} inviteRecordId=${record.id}`
+      );
+    } catch (error) {
+      logger.warn(`[MEMBERSHIP] Local Seerr mapping cleanup failed: ${error.message}`);
+    }
 
     const deletion = await deleteJellyfinUser(jellyfinUserId);
+    logger.info(
+      deletion.alreadyAbsent
+        ? `[MEMBERSHIP] Jellyfin user already absent discordUserId=${discordUserId} jellyfinUserId=${jellyfinUserId} inviteRecordId=${record.id}`
+        : `[MEMBERSHIP] Deleted Jellyfin user discordUserId=${discordUserId} jellyfinUserId=${jellyfinUserId} jellyfinUsername=${deletion.username || username || "unknown"} inviteRecordId=${record.id}`
+    );
+
+    let seerrDeletion = null;
+    if (record.seerrUserId) {
+      seerrDeletion = await deleteSeerrUser(record.seerrUserId, jellyfinUserId);
+      logger.info(
+        seerrDeletion.alreadyAbsent
+          ? `[MEMBERSHIP] Seerr user already absent discordUserId=${discordUserId} seerrUserId=${record.seerrUserId} jellyfinUserId=${jellyfinUserId} inviteRecordId=${record.id}`
+          : `[MEMBERSHIP] Deleted Seerr user discordUserId=${discordUserId} seerrUserId=${record.seerrUserId} jellyfinUserId=${jellyfinUserId} inviteRecordId=${record.id}`
+      );
+    }
+
+    const cleanupCompletedAt = new Date().toISOString();
     updateInviteRecord(record.id, {
       status: "departed_deleted",
       wizarrUserId,
       jellyfinUserId,
       jellyfinUsername: username || deletion.username || null,
-      departedAt: new Date().toISOString(),
+      departedAt: cleanupCompletedAt,
       lastError: null,
-      seerrAssociationStatus: record.seerrUserId
-        ? "removed"
-        : record.seerrAssociationStatus,
-      seerrRemovedAt: record.seerrUserId
-        ? new Date().toISOString()
-        : null,
+      seerrAssociationStatus: record.seerrUserId ? "deleted" : record.seerrAssociationStatus,
+      seerrRemovedAt: record.seerrUserId ? cleanupCompletedAt : null,
+      seerrDeletedAt: record.seerrUserId && seerrDeletion ? cleanupCompletedAt : null,
     });
     await sendAudit(client, {
       result: "jellyfin-user-deleted",
@@ -155,8 +184,14 @@ async function deleteMappedJellyfinAccount(client, record, discordUserId, discor
   }
 
   if (record?.invitationId && isActiveInviteStatus(record.status)) {
-    try { await deleteInvitation(record.invitationId); }
-    catch (error) { logger.warn(`[MEMBERSHIP] Pending invitation revoke failed: ${error.message}`); }
+    try {
+      await deleteInvitation(record.invitationId);
+      logger.info(
+        `[MEMBERSHIP] Revoked pending Wizarr invitation discordUserId=${discordUserId} invitationId=${record.invitationId} inviteRecordId=${record.id}`
+      );
+    } catch (error) {
+      logger.warn(`[MEMBERSHIP] Pending invitation revoke failed: ${error.message}`);
+    }
     updateInviteRecord(record.id, {
       status: "departed_cancelled",
       departedAt: new Date().toISOString(),

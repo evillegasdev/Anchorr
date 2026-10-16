@@ -49,7 +49,15 @@ async function completeDiscord(record, username) {
   const pendingRole = process.env.DISCORD_PENDING_ONBOARDING_ROLE_ID;
   if (!mediaRole || !pendingRole) throw new Error("Discord onboarding roles are not configured");
   await member.roles.add(mediaRole, "ForFlower onboarding reconciliation completed");
+  logger.info(
+    `[RECONCILE] Added Media Member role discordUserId=${record.discordUserId} guildId=${record.guildId} roleId=${mediaRole} inviteRecordId=${record.id}`
+  );
+
   await member.roles.remove(pendingRole, "ForFlower onboarding reconciliation completed");
+  logger.info(
+    `[RECONCILE] Removed Pending Onboarding role discordUserId=${record.discordUserId} guildId=${record.guildId} roleId=${pendingRole} inviteRecordId=${record.id}`
+  );
+
   try {
     await member.send(`✅ ForFlower onboarding is complete for Jellyfin user **${username}**.`);
   } catch (error) {

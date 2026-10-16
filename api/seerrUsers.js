@@ -29,6 +29,57 @@ export async function listSeerrUsers() {
   return users;
 }
 
+export async function deleteSeerrUser(seerrUserId, expectedJellyfinUserId) {
+  const numericUserId = Number(seerrUserId);
+  if (!Number.isSafeInteger(numericUserId) || numericUserId <= 0) {
+    throw new Error("A valid positive Seerr user ID is required");
+  }
+  if (typeof expectedJellyfinUserId !== "string" || !/^[a-f0-9]{32}$/i.test(expectedJellyfinUserId)) {
+    throw new Error("A valid expected Jellyfin user ID is required for Seerr deletion");
+  }
+
+  const api = client();
+  const currentResponse = await api.get("/auth/me");
+  const currentUserId = Number(currentResponse.data?.id);
+  if (Number.isSafeInteger(currentUserId) && currentUserId === numericUserId) {
+    throw new Error("Refusing to delete the Seerr account associated with the API key");
+  }
+
+  let targetUser;
+  try {
+    const targetResponse = await api.get(`/user/${encodeURIComponent(numericUserId)}`);
+    targetUser = targetResponse.data;
+  } catch (error) {
+    if (error?.response?.status === 404) {
+      return { deleted: false, alreadyAbsent: true, seerrUserId: numericUserId };
+    }
+    throw error;
+  }
+
+  if (!targetUser || Number(targetUser.id) !== numericUserId) {
+    throw new Error("Seerr returned an unexpected target user");
+  }
+  if (String(targetUser.jellyfinUserId || "") !== String(expectedJellyfinUserId)) {
+    throw new Error("Refusing to delete Seerr user because the Jellyfin user ID does not match");
+  }
+
+  await api.delete(`/user/${encodeURIComponent(numericUserId)}`);
+  try {
+    await api.get(`/user/${encodeURIComponent(numericUserId)}`);
+  } catch (error) {
+    if (error?.response?.status === 404) {
+      return {
+        deleted: true,
+        alreadyAbsent: false,
+        seerrUserId: numericUserId,
+        displayName: targetUser.displayName || targetUser.username || null,
+      };
+    }
+    throw error;
+  }
+  throw new Error("Seerr user still exists after deletion request");
+}
+
 export async function findSeerrUserByJellyfinId(jellyfinUserId) {
   const users = await listSeerrUsers();
   const matches = users.filter((user) =>
