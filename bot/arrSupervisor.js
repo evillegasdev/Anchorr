@@ -2,6 +2,7 @@ import { EmbedBuilder } from "discord.js";
 import logger from "../utils/logger.js";
 import { PersistentMap } from "../utils/persistentMap.js";
 import { listRequestCorrelations } from "../utils/requestCorrelationStore.js";
+import { recordArrActivity, getArrActivityRoundupWindowHours } from "./arrActivityRoundup.js";
 
 const POLL_MS = 60 * 1000;
 const STALL_MS = 45 * 60 * 1000;
@@ -65,12 +66,23 @@ function searchCommand(commands,mediaType,localId) {
   })||null;
 }
 async function send(client,c,title,description,color,fields=[]) {
-  const channel=await client.channels.fetch(process.env.DISCORD_REQUEST_STATUS_CHANNEL_ID);
-  if (!channel?.isTextBased()) throw new Error("Request-status channel is not text-capable");
-  const users=c.discordUserIds.filter((id)=>/^\d{17,20}$/.test(String(id)));
-  const embed=new EmbedBuilder().setTitle(title).setDescription(description).setColor(color).setTimestamp();
-  if (fields.length) embed.addFields(fields);
-  await channel.send({content:users.map((id)=>`<@${id}>`).join(" ")||"Arr status update",embeds:[embed],allowedMentions:{users,roles:[]}});
+  const app=c.mediaType === "movie" ? "radarr" : "sonarr";
+  const values=Object.fromEntries(fields.map((field)=>[field.name,field.value]));
+  const kind=String(title||"").replace(/^(Sonarr|Radarr):\s*/i,"");
+  await recordArrActivity(client,{
+    app,
+    mediaType:c.mediaType,
+    tmdbId:c.tmdbId,
+    title:description || "Tracked media",
+    kind:kind.charAt(0).toUpperCase()+kind.slice(1),
+    color,
+    state:values.State,
+    status:values.Status,
+    noProgress:values["No progress"],
+    remainingBytes:values["Remaining bytes"],
+    detail:values.Detail || values.Evidence,
+    requesterIds:c.discordUserIds,
+  });
 }
 async function evaluate(client,c) {
   if (["available","MEDIA_AVAILABLE","MEDIA_DECLINED"].includes(c.status)) return;
@@ -173,5 +185,5 @@ export function startArrSupervisor(client) {
   timer=setInterval(()=>tick().catch((e)=>logger.error(`[ARR SUPERVISOR] Poll failed: ${e.message}`)),POLL_MS);
   timer.unref?.();
   setTimeout(()=>tick().catch((e)=>logger.error(`[ARR SUPERVISOR] Initial poll failed: ${e.message}`)),15000).unref?.();
-  logger.info(`[ARR SUPERVISOR] Started with ${POLL_MS/1000}s polling, ${STALL_MS/60000}m stall threshold`);
+  logger.info(`[ARR SUPERVISOR] Started with ${POLL_MS/1000}s polling, ${STALL_MS/60000}m stall threshold, activityRoundupWindow=${getArrActivityRoundupWindowHours()}h`);
 }

@@ -3,6 +3,7 @@ import logger from "./utils/logger.js";
 import { PersistentMap } from "./utils/persistentMap.js";
 import { getRequestCorrelation } from "./utils/requestCorrelationStore.js";
 import { queueDelayedGrab } from "./bot/arrGrabNotifier.js";
+import { recordArrActivity } from "./bot/arrActivityRoundup.js";
 
 import { queueSeerrRecentlyAddedScan } from "./utils/seerrRecentScanTrigger.js";
 const SUPPORTED = new Set([
@@ -156,6 +157,26 @@ export async function handleArrWebhook(payload,client,pendingRequests) {
     dedup.set(key,{type,sentAt:new Date().toISOString(),delayed:true});
     logger.info(`[ARR WEBHOOK] Queued delayed ${app} Grab media=${media.tmdbId||media.tvdbId||"unknown"} requesters=${requesterIds.length}`);
     return {queued:true,requesterIds};
+  }
+  if (type === "ManualInteractionRequired") {
+    const body=detail(payload,type);
+    await recordArrActivity(client,{
+      app,
+      mediaType:media.type,
+      tmdbId:media.tmdbId,
+      tvdbId:media.tvdbId,
+      localId:media.localId,
+      title:media.title || clean(payload.sourceTitle,256) || "Tracked media",
+      year:media.year,
+      kind:"Manual interaction required",
+      color:0xE67E22,
+      detail:body,
+      downloadClient:clean(payload.downloadClient,100),
+      requesterIds,
+    });
+    dedup.set(key,{type,sentAt:new Date().toISOString(),roundup:true});
+    logger.info(`[ARR WEBHOOK] Added ${app} ${type} to media activity roundup media=${media.tmdbId||media.tvdbId||media.localId||"unknown"} requesters=${requesterIds.length}`);
+    return {roundup:true,requesterIds};
   }
   const [title,color]=eventInfo(type,app);
   const subject=media.title ? `${media.title}${media.year ? ` (${media.year})` : ""}` : (clean(payload.sourceTitle,256)||"Arr status update");
