@@ -139,6 +139,18 @@ export async function handleArrWebhook(payload,client,pendingRequests) {
       releaseTitle:clean(payload.release?.releaseTitle || payload.release?.indexer,1000),
       downloadClient:clean(payload.downloadClient,100),
       downloadId:clean(payload.downloadId,200),
+      // Preserve exact Sonarr Grab identity for per-download import suppression.
+      // Roundup grouping remains series-level; suppression does not.
+      episodeIds:app === "sonarr"
+        ? [...new Set((payload.episodes || [])
+            .map((episode) => positive(episode?.id))
+            .filter(Boolean))]
+        : [],
+      seasonNumbers:app === "sonarr"
+        ? [...new Set((payload.episodes || [])
+            .map((episode) => Number.parseInt(String(episode?.seasonNumber),10))
+            .filter((season) => Number.isSafeInteger(season) && season >= 0))]
+        : [],
       requesterIds,
     });
     dedup.set(key,{type,sentAt:new Date().toISOString(),delayed:true});
