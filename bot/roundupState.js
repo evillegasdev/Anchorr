@@ -2,16 +2,33 @@ import { PersistentMap } from "../utils/persistentMap.js";
 import logger from "../utils/logger.js";
 
 const NEVER_TTL_MS = 100 * 365 * 24 * 60 * 60 * 1000;
+const SERIES_GRAB_ROUNDUP_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const map = new PersistentMap("roundup-state", NEVER_TTL_MS, {
   validateValue: (v) =>
     (typeof v === "number" && Number.isFinite(v)) || Array.isArray(v),
 });
 
+// PersistentMap prefixes the name with "dedup-", so this writes:
+// dedup-series-grab-roundups.json next to config.json.
+const seriesGrabRoundups = new PersistentMap(
+  "series-grab-roundups",
+  SERIES_GRAB_ROUNDUP_TTL_MS,
+  {
+    validateValue: (value) =>
+      value &&
+      typeof value === "object" &&
+      typeof value.messageId === "string" &&
+      typeof value.channelId === "string" &&
+      typeof value.createdAt === "string" &&
+      typeof value.lastUpdatedAt === "string" &&
+      Array.isArray(value.entries),
+  }
+);
+
 const INSTALLED_AT_KEY = "installedAt";
 const LAST_POSTED_AT_KEY = "lastPostedAt";
 const FAILURES_KEY = "failures";
-
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function getInstalledAt(now = Date.now()) {
@@ -44,11 +61,25 @@ export function getFailureCount(now = Date.now()) {
 }
 
 export function recordFailure(ms = Date.now()) {
-  const list = Array.isArray(map.get(FAILURES_KEY)) ? map.get(FAILURES_KEY) : [];
+  const list = Array.isArray(map.get(FAILURES_KEY))
+    ? map.get(FAILURES_KEY)
+    : [];
   const cutoff = ms - WEEK_MS;
   const pruned = list.filter((t) => typeof t === "number" && t >= cutoff);
   pruned.push(ms);
   map.set(FAILURES_KEY, pruned);
+}
+
+export function getSeriesGrabRoundup(key) {
+  return seriesGrabRoundups.get(key) || null;
+}
+
+export function setSeriesGrabRoundup(key, value) {
+  seriesGrabRoundups.set(key, value, SERIES_GRAB_ROUNDUP_TTL_MS);
+}
+
+export function deleteSeriesGrabRoundup(key) {
+  seriesGrabRoundups.delete(key);
 }
 
 (function migrateLegacyLastPostedAt() {
